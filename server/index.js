@@ -9,11 +9,19 @@ const fs = require('fs');
 const { saveMessage, getMessages, upsertContact, createInvoice, getInvoiceByInvoiceId, listInvoices, markInvoicePaid, createSubscription, getSubscriptionByWorkspace, createTemplate, listTemplates, getTemplateById, updateTemplate, deleteTemplate, createAutomation, listAutomations, getAutomationById, updateAutomation, deleteAutomation, getTotals, getCountsByDay, getTopContacts, ensureConversation, listConversations, assignConversation, unassignConversation } = require('./data');
 const { getSupabase } = require('./supabase');
 const { registerOrLogin, signToken, authMiddleware } = require('./auth');
-const { Configuration, OpenAIApi } = require('openai');
+const OpenAI = require('openai');
 const { v4: uuidv4 } = require('uuid');
 
 const PORT = process.env.PORT || 3333;
-const SESSIONS_DIR = path.join(__dirname, 'sessions');
+const SESSIONS_DIR = process.env.WHATSAPP_SESSIONS_DIR || path.join(__dirname, 'sessions');
+
+// Global safety nets to avoid silent exits
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
 
 // Removed SQLite initialization (now Supabase-only)
 
@@ -27,9 +35,21 @@ let sock = null;
 let sockState = { connected: false, qr: null };
 const onlineAgents = new Set();
 
-const openai = new OpenAIApi(new Configuration({
-  apiKey: process.env.OPENAI_KEY
-}));
+let openai = null;
+if (process.env.OPENAI_KEY) {
+  try {
+    openai = new OpenAI({ apiKey: process.env.OPENAI_KEY });
+  } catch (e) {
+    console.warn('OpenAI client init failed:', e.message);
+  }
+}
+
+// Startup diagnostics
+try {
+  const { getSupabase } = require('./supabase');
+  const s = getSupabase();
+  if (!s) console.warn('Supabase not configured: set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY');
+} catch {}
 
 async function startSocket() {
   try {
@@ -84,15 +104,18 @@ async function startSocket() {
           } else if (lower.includes('hours') || lower.includes('open')) {
             reply = 'We are open Mon-Fri 9am-6pm. Weekend by appointment.';
           } else {
-            if (process.env.OPENAI_KEY) {
+            if (openai) {
               try {
                 const prompt = `You are a helpful sales assistant for a Caribbean small business. A customer said: "${text}". Craft a short (max 40 words) friendly reply with a CTA to order.`;
-                const resp = await openai.createChatCompletion({
+                const resp = await openai.chat.completions.create({
                   model: 'gpt-4o-mini',
-                  messages: [{role:'system', content: 'You are a helpful sales assistant.'},{role:'user', content: prompt}],
-                  max_tokens: 80,
+                  messages: [
+                    { role: 'system', content: 'You are a helpful sales assistant.' },
+                    { role: 'user', content: prompt }
+                  ],
+                  max_tokens: 80
                 });
-                reply = resp.data.choices?.[0]?.message?.content?.trim() || 'Thanks, we will be with you shortly!';
+                reply = resp.choices?.[0]?.message?.content?.trim() || 'Thanks, we will be with you shortly!';
               } catch (err) {
                 console.error('OpenAI error', err.message);
                 reply = 'Thanks, we will be with you shortly!';
