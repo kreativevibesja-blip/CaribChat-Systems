@@ -5,9 +5,9 @@ const cors = require('cors');
 const { default: makeWASocket, useMultiFileAuthState } = require('@whiskeysockets/baileys');
 const path = require('path');
 const fs = require('fs');
-// Use SQLite init for fallback; operational data functions now come from data layer (Supabase-aware)
-const { init } = require('./db');
+// Supabase-only data layer now
 const { saveMessage, getMessages, upsertContact, createInvoice, getInvoiceByInvoiceId, listInvoices, markInvoicePaid, createSubscription, getSubscriptionByWorkspace, createTemplate, listTemplates, getTemplateById, updateTemplate, deleteTemplate, createAutomation, listAutomations, getAutomationById, updateAutomation, deleteAutomation, getTotals, getCountsByDay, getTopContacts, ensureConversation, listConversations, assignConversation, unassignConversation } = require('./data');
+const { getSupabase } = require('./supabase');
 const { registerOrLogin, signToken, authMiddleware } = require('./auth');
 const { Configuration, OpenAIApi } = require('openai');
 const { v4: uuidv4 } = require('uuid');
@@ -15,7 +15,7 @@ const { v4: uuidv4 } = require('uuid');
 const PORT = process.env.PORT || 3333;
 const SESSIONS_DIR = path.join(__dirname, 'sessions');
 
-init(); // init database
+// Removed SQLite initialization (now Supabase-only)
 
 const app = express();
 const server = http.createServer(app);
@@ -184,15 +184,15 @@ app.post('/api/auth/forgot', async (req, res) => {
     const { email } = req.body || {};
     if (!email) return res.status(400).json({ error: 'email required' });
     const token = uuidv4().slice(0,8);
+    const expires = new Date(Date.now()+15*60*1000).toISOString();
+    const supa = getSupabase();
+    if (supa){
+      await supa.from('password_resets').insert({ email, code: token, expires_at: expires, used: false });
+    }
     console.log(`[password-reset] ${email} reset code: ${token}`);
-    try {
-      const Database = require('better-sqlite3');
-      const db = new Database('./caribchat.db');
-      const expires = new Date(Date.now()+15*60*1000).toISOString();
-      db.prepare(`INSERT INTO password_resets (email, code, expires_at) VALUES (?,?,?)`).run(email, token, expires);
-    } catch {}
     res.status(202).json({ message: 'If the email exists, a reset code was generated.'});
   } catch (e) {
+    console.error(e);
     res.status(500).json({ error: 'failed to process request' });
   }
 });
@@ -202,18 +202,23 @@ app.post('/api/auth/reset', async (req, res)=>{
   try{
     const { email, code, newPassword } = req.body||{};
     if (!email || !code || !newPassword) return res.status(400).json({ error:'email, code, newPassword required' });
-    // SQLite path for now
-    const Database = require('better-sqlite3');
-    const db = new Database('./caribchat.db');
-    const row = db.prepare(`SELECT * FROM password_resets WHERE email=? AND code=? AND used=0 ORDER BY id DESC LIMIT 1`).get(email, code);
+    const supa = getSupabase();
+    if (!supa) return res.status(500).json({ error:'Supabase not configured' });
+    const lookup = await supa.from('password_resets').select('*').eq('email', email).eq('code', code).eq('used', false).order('id',{ascending:false}).limit(1);
+    if (lookup.error) return res.status(500).json({ error:'lookup failed' });
+    const row = lookup.data[0];
     if (!row) return res.status(400).json({ error:'invalid code' });
     if (new Date(row.expires_at) < new Date()) return res.status(400).json({ error:'code expired' });
     const bcrypt = require('bcryptjs');
     const hash = await bcrypt.hash(newPassword, 10);
-    db.prepare(`UPDATE users SET password_hash=? WHERE email=?`).run(hash, email);
-    db.prepare(`UPDATE password_resets SET used=1 WHERE id=?`).run(row.id);
+    const updUser = await supa.from('users').update({ password_hash: hash }).eq('email', email);
+    if (updUser.error) return res.status(500).json({ error:'update failed' });
+    await supa.from('password_resets').update({ used: true }).eq('id', row.id);
     res.json({ success:true });
-  } catch(e){ res.status(500).json({ error:'reset failed' }); }
+  } catch(e){
+    console.error(e);
+    res.status(500).json({ error:'reset failed' });
+  }
 });
 
 // API: session

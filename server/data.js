@@ -1,191 +1,178 @@
-// Unified data access layer: Supabase if configured, else SQLite fallback
+// Supabase-only data access layer
 const { getSupabase } = require('./supabase');
-const sqlite = require('./db');
 
-function usingSupabase(){ return !!getSupabase(); }
-
-// Helper to standardize return after Supabase insert/select
-function supaResult(res){
-  if (res.error) throw res.error;
-  return res.data;
-}
-
-// Users & Workspaces
-async function registerOrLoginUser(email, passwordHash){
-  if (!usingSupabase()) {
-    // SQLite path delegated to auth.js existing logic
-    throw new Error('SQLite user creation handled elsewhere');
-  }
+function requireSupa(){
   const supa = getSupabase();
-  const existing = supaResult(await supa.from('users').select('*').eq('email', email).limit(1));
-  if (existing.length) return existing[0];
-  const inserted = supaResult(await supa.from('users').insert({ email, password_hash: passwordHash }).select());
-  return inserted[0];
+  if (!supa) throw new Error('Supabase not configured');
+  return supa;
 }
 
 async function ensureWorkspaceForUser(user){
-  if (!usingSupabase()) return null;
-  const supa = getSupabase();
+  const supa = requireSupa();
   const slug = user.email.split('@')[0].replace(/[^a-z0-9]+/gi,'-').toLowerCase();
-  const existing = supaResult(await supa.from('workspaces').select('*').eq('owner_user_id', user.id).limit(1));
-  if (existing.length) return existing[0];
-  const created = supaResult(await supa.from('workspaces').insert({ slug, name: slug, owner_user_id: user.id }).select());
-  return created[0];
+  const existing = await supa.from('workspaces').select('*').eq('owner_user_id', user.id).limit(1);
+  if (existing.error) throw existing.error;
+  if (existing.data.length) return existing.data[0];
+  const created = await supa.from('workspaces').insert({ slug, name: slug, owner_user_id: user.id }).select();
+  if (created.error) throw created.error;
+  return created.data[0];
 }
 
 // Messages
 async function saveMessage(record){
-  if (!usingSupabase()) return sqlite.saveMessage(record);
-  const supa = getSupabase();
-  const inserted = supaResult(await supa.from('messages').insert({
+  const supa = requireSupa();
+  const ins = await supa.from('messages').insert({
     from_number: record.from_number,
     to_number: record.to_number,
     direction: record.direction,
     text: record.text,
     meta: record.meta || {},
-  }).select());
-  return inserted[0];
+  }).select();
+  if (ins.error) throw ins.error;
+  return ins.data[0];
 }
 
 async function getMessages(limit=200, peer=null){
-  if (!usingSupabase()) return sqlite.getMessages(limit, peer);
-  const supa = getSupabase();
-  let query = supa.from('messages').select('*').order('created_at', { ascending: false }).limit(limit);
-  if (peer) {
+  const supa = requireSupa();
+  let query = supa.from('messages').select('*').order('created_at', { ascending:false }).limit(limit);
+  if (peer){
     query = query.or(`from_number.eq.${peer},to_number.eq.${peer}`);
   }
-  const rows = supaResult(await query);
-  return rows;
+  const res = await query;
+  if (res.error) throw res.error;
+  return res.data;
 }
 
 async function upsertContact(phone, name=null){
-  if (!usingSupabase()) return sqlite.upsertContact(phone, name);
-  const supa = getSupabase();
-  const existing = supaResult(await supa.from('contacts').select('id').eq('phone', phone).limit(1));
-  if (existing.length) return existing[0].id;
-  const inserted = supaResult(await supa.from('contacts').insert({ phone, name }).select('id');
-  return inserted[0].id;
+  const supa = requireSupa();
+  const existing = await supa.from('contacts').select('id').eq('phone', phone).limit(1);
+  if (existing.error) throw existing.error;
+  if (existing.data.length) return existing.data[0].id;
+  const ins = await supa.from('contacts').insert({ phone, name }).select('id');
+  if (ins.error) throw ins.error;
+  return ins.data[0].id;
 }
 
 // Templates CRUD
 async function createTemplate({ name, category=null, content }){
-  if (!usingSupabase()) return sqlite.createTemplate({ name, category, content });
-  const supa = getSupabase();
-  const inserted = supaResult(await supa.from('templates').insert({ name, category, content, updated_at: new Date().toISOString() }).select());
-  return inserted[0];
+  const supa = requireSupa();
+  const ins = await supa.from('templates').insert({ name, category, content, updated_at: new Date().toISOString() }).select();
+  if (ins.error) throw ins.error;
+  return ins.data[0];
 }
 async function listTemplates(limit=200){
-  if (!usingSupabase()) return sqlite.listTemplates(limit);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('templates').select('*').order('updated_at', { ascending:false }).order('created_at', { ascending:false }).limit(limit));
-  return rows;
+  const supa = requireSupa();
+  const res = await supa.from('templates').select('*').order('updated_at',{ascending:false}).order('created_at',{ascending:false}).limit(limit);
+  if (res.error) throw res.error;
+  return res.data;
 }
 async function getTemplateById(id){
-  if (!usingSupabase()) return sqlite.getTemplateById(id);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('templates').select('*').eq('id', id).limit(1));
-  return rows[0]||null;
+  const supa = requireSupa();
+  const res = await supa.from('templates').select('*').eq('id', id).limit(1);
+  if (res.error) throw res.error;
+  return res.data[0]||null;
 }
 async function updateTemplate(id, { name, category, content }){
-  if (!usingSupabase()) return sqlite.updateTemplate(id, { name, category, content });
-  const supa = getSupabase();
-  const updated = supaResult(await supa.from('templates').update({ name, category, content, updated_at: new Date().toISOString() }).eq('id', id).select());
-  return updated[0]||null;
+  const supa = requireSupa();
+  const upd = await supa.from('templates').update({ name, category, content, updated_at: new Date().toISOString() }).eq('id', id).select();
+  if (upd.error) throw upd.error;
+  return upd.data[0]||null;
 }
 async function deleteTemplate(id){
-  if (!usingSupabase()) return sqlite.deleteTemplate(id);
-  const supa = getSupabase();
-  await supa.from('templates').delete().eq('id', id);
+  const supa = requireSupa();
+  const del = await supa.from('templates').delete().eq('id', id);
+  if (del.error) throw del.error;
   return { success:true };
 }
 
 // Automations CRUD
 async function createAutomation({ name, flow_json }){
-  if (!usingSupabase()) return sqlite.createAutomation({ name, flow_json });
-  const supa = getSupabase();
-  const inserted = supaResult(await supa.from('automations').insert({ name, flow_json, updated_at: new Date().toISOString() }).select());
-  return inserted[0];
+  const supa = requireSupa();
+  const ins = await supa.from('automations').insert({ name, flow_json, updated_at: new Date().toISOString() }).select();
+  if (ins.error) throw ins.error;
+  return ins.data[0];
 }
 async function listAutomations(limit=200){
-  if (!usingSupabase()) return sqlite.listAutomations(limit);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('automations').select('*').order('updated_at',{ascending:false}).order('created_at',{ascending:false}).limit(limit));
-  return rows;
+  const supa = requireSupa();
+  const res = await supa.from('automations').select('*').order('updated_at',{ascending:false}).order('created_at',{ascending:false}).limit(limit);
+  if (res.error) throw res.error;
+  return res.data;
 }
 async function getAutomationById(id){
-  if (!usingSupabase()) return sqlite.getAutomationById(id);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('automations').select('*').eq('id', id).limit(1));
-  return rows[0]||null;
+  const supa = requireSupa();
+  const res = await supa.from('automations').select('*').eq('id', id).limit(1);
+  if (res.error) throw res.error;
+  return res.data[0]||null;
 }
 async function updateAutomation(id, { name, flow_json }){
-  if (!usingSupabase()) return sqlite.updateAutomation(id, { name, flow_json });
-  const supa = getSupabase();
-  const updated = supaResult(await supa.from('automations').update({ name, flow_json, updated_at: new Date().toISOString() }).eq('id', id).select());
-  return updated[0]||null;
+  const supa = requireSupa();
+  const upd = await supa.from('automations').update({ name, flow_json, updated_at: new Date().toISOString() }).eq('id', id).select();
+  if (upd.error) throw upd.error;
+  return upd.data[0]||null;
 }
 async function deleteAutomation(id){
-  if (!usingSupabase()) return sqlite.deleteAutomation(id);
-  const supa = getSupabase();
-  await supa.from('automations').delete().eq('id', id);
+  const supa = requireSupa();
+  const del = await supa.from('automations').delete().eq('id', id);
+  if (del.error) throw del.error;
   return { success:true };
 }
 
 // Invoices / Subscriptions
 async function createInvoice({ invoice_id, workspace, plan, amount, currency }){
-  if (!usingSupabase()) return sqlite.createInvoice({ invoice_id, workspace, plan, amount, currency });
-  const supa = getSupabase();
-  const inserted = supaResult(await supa.from('invoices').insert({ invoice_id, workspace, plan, amount, currency, status:'pending' }).select());
-  return inserted[0];
+  const supa = requireSupa();
+  const ins = await supa.from('invoices').insert({ invoice_id, workspace, plan, amount, currency, status:'pending' }).select();
+  if (ins.error) throw ins.error;
+  return ins.data[0];
 }
 async function getInvoiceByInvoiceId(invoice_id){
-  if (!usingSupabase()) return sqlite.getInvoiceByInvoiceId(invoice_id);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('invoices').select('*').eq('invoice_id', invoice_id).limit(1));
-  return rows[0]||null;
+  const supa = requireSupa();
+  const res = await supa.from('invoices').select('*').eq('invoice_id', invoice_id).limit(1);
+  if (res.error) throw res.error;
+  return res.data[0]||null;
 }
 async function listInvoices(limit=100){
-  if (!usingSupabase()) return sqlite.listInvoices(limit);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('invoices').select('*').order('created_at',{ascending:false}).limit(limit));
-  return rows;
+  const supa = requireSupa();
+  const res = await supa.from('invoices').select('*').order('created_at',{ascending:false}).limit(limit);
+  if (res.error) throw res.error;
+  return res.data;
 }
 async function markInvoicePaid(invoice_id){
-  if (!usingSupabase()) return sqlite.markInvoicePaid(invoice_id);
-  const supa = getSupabase();
-  await supa.from('invoices').update({ status:'paid' }).eq('invoice_id', invoice_id);
+  const supa = requireSupa();
+  const upd = await supa.from('invoices').update({ status:'paid' }).eq('invoice_id', invoice_id);
+  if (upd.error) throw upd.error;
   return getInvoiceByInvoiceId(invoice_id);
 }
 async function createSubscription({ workspace, plan, months=1 }){
-  if (!usingSupabase()) return sqlite.createSubscription({ workspace, plan, months });
+  const supa = requireSupa();
   const started = new Date();
   const expires = new Date(Date.now() + months*30*24*60*60*1000);
-  const supa = getSupabase();
-  const inserted = supaResult(await supa.from('subscriptions').insert({ workspace, plan, status:'active', started_at: started.toISOString(), expires_at: expires.toISOString() }).select());
-  return inserted[0];
+  const ins = await supa.from('subscriptions').insert({ workspace, plan, status:'active', started_at: started.toISOString(), expires_at: expires.toISOString() }).select();
+  if (ins.error) throw ins.error;
+  return ins.data[0];
 }
 async function getSubscriptionByWorkspace(workspace){
-  if (!usingSupabase()) return sqlite.getSubscriptionByWorkspace(workspace);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('subscriptions').select('*').eq('workspace', workspace).order('id',{ascending:false}).limit(1));
-  return rows[0]||null;
+  const supa = requireSupa();
+  const res = await supa.from('subscriptions').select('*').eq('workspace', workspace).order('id',{ascending:false}).limit(1);
+  if (res.error) throw res.error;
+  return res.data[0]||null;
 }
 
 // Analytics
 async function getTotals(){
-  if (!usingSupabase()) return sqlite.getTotals();
-  const supa = getSupabase();
-  const inbound = supaResult(await supa.from('messages').select('id', { count:'exact', head:true }).eq('direction','in')).length;
-  const outbound = supaResult(await supa.from('messages').select('id', { count:'exact', head:true }).eq('direction','out')).length;
-  return { in: inbound, out: outbound };
+  const supa = requireSupa();
+  const inboundRes = await supa.from('messages').select('id', { count:'exact', head:true }).eq('direction','in');
+  const outboundRes = await supa.from('messages').select('id', { count:'exact', head:true }).eq('direction','out');
+  if (inboundRes.error) throw inboundRes.error;
+  if (outboundRes.error) throw outboundRes.error;
+  return { in: inboundRes.count || 0, out: outboundRes.count || 0 };
 }
 async function getCountsByDay(days=14){
-  if (!usingSupabase()) return sqlite.getCountsByDay(days);
-  const supa = getSupabase();
+  const supa = requireSupa();
   const since = new Date(Date.now() - days*24*60*60*1000).toISOString();
-  const rows = supaResult(await supa.from('messages').select('created_at,direction').gte('created_at', since));
+  const res = await supa.from('messages').select('created_at,direction').gte('created_at', since);
+  if (res.error) throw res.error;
   const bucket = {};
-  for (const r of rows){
+  for (const r of res.data){
     const day = r.created_at.slice(0,10);
     if (!bucket[day]) bucket[day] = { in:0, out:0 };
     bucket[day][r.direction]++;
@@ -193,11 +180,11 @@ async function getCountsByDay(days=14){
   return Object.entries(bucket).sort(([a],[b])=> a.localeCompare(b)).map(([date, counts]) => ({ date, in: counts.in, out: counts.out }));
 }
 async function getTopContacts(limit=5){
-  if (!usingSupabase()) return sqlite.getTopContacts(limit);
-  const supa = getSupabase();
-  const rows = supaResult(await supa.from('messages').select('from_number,to_number,direction'));
+  const supa = requireSupa();
+  const res = await supa.from('messages').select('from_number,to_number,direction');
+  if (res.error) throw res.error;
   const tally = {};
-  for (const m of rows){
+  for (const m of res.data){
     const peer = m.direction==='in' ? m.from_number : m.to_number;
     tally[peer] = (tally[peer]||0) + 1;
   }
@@ -205,35 +192,36 @@ async function getTopContacts(limit=5){
 }
 
 module.exports = {
-  usingSupabase,
-  // user/workspace (partial for now)
-  registerOrLoginUser,
   ensureWorkspaceForUser,
-  // messaging
   saveMessage,
   getMessages,
   upsertContact,
-  // conversations
+  createTemplate, listTemplates, getTemplateById, updateTemplate, deleteTemplate,
+  createAutomation, listAutomations, getAutomationById, updateAutomation, deleteAutomation,
+  createInvoice, getInvoiceByInvoiceId, listInvoices, markInvoicePaid, createSubscription, getSubscriptionByWorkspace,
+  getTotals, getCountsByDay, getTopContacts,
   ensureConversation: async (peer)=>{
-    if (!usingSupabase()) return sqlite.ensureConversation(peer);
-    const supa = getSupabase();
-    const found = supaResult(await supa.from('conversations').select('*').eq('peer', peer).limit(1));
-    if (found.length) return found[0];
-    const ins = supaResult(await supa.from('conversations').insert({ peer }).select());
-    return ins[0];
+    const supa = requireSupa();
+    const found = await supa.from('conversations').select('*').eq('peer', peer).limit(1);
+    if (found.error) throw found.error;
+    if (found.data.length) return found.data[0];
+    const ins = await supa.from('conversations').insert({ peer }).select();
+    if (ins.error) throw ins.error;
+    return ins.data[0];
   },
   listConversations: async (limit=200, filter='all', userId=null)=>{
-    if (!usingSupabase()) return sqlite.listConversations(limit, filter, userId);
-    const supa = getSupabase();
-    const msgs = supaResult(await supa.from('messages').select('from_number,to_number,created_at,direction'));
+    const supa = requireSupa();
+    const msgs = await supa.from('messages').select('from_number,to_number,created_at,direction');
+    if (msgs.error) throw msgs.error;
     const peers = new Map();
-    for (const m of msgs){
+    for (const m of msgs.data){
       const p = m.direction==='in' ? m.from_number : m.to_number;
-      const t = new Date(m.created_at).toISOString();
-      peers.set(p, Math.max(peers.get(p)||0, Date.parse(t)));
+      const t = Date.parse(m.created_at);
+      peers.set(p, Math.max(peers.get(p)||0, t));
     }
-    const convRows = supaResult(await supa.from('conversations').select('*'));
-    const convMap = new Map(convRows.map(r=>[r.peer, r]));
+    const convRows = await supa.from('conversations').select('*');
+    if (convRows.error) throw convRows.error;
+    const convMap = new Map(convRows.data.map(r=>[r.peer, r]));
     let items = Array.from(peers.entries()).map(([peer, ts])=> ({ peer, last_time: new Date(ts).toISOString(), assigned_user_id: convMap.get(peer)?.assigned_user_id || null }));
     items.sort((a,b)=> Date.parse(b.last_time)-Date.parse(a.last_time));
     items = items.filter(r => {
@@ -244,23 +232,15 @@ module.exports = {
     return items.slice(0, limit);
   },
   assignConversation: async (peer, userId)=>{
-    if (!usingSupabase()) return sqlite.assignConversation(peer, userId);
-    const supa = getSupabase();
-    const upd = supaResult(await supa.from('conversations').upsert({ peer, assigned_user_id: userId, assigned_at: new Date().toISOString() }).select());
-    return upd[0];
+    const supa = requireSupa();
+    const upd = await supa.from('conversations').upsert({ peer, assigned_user_id: userId, assigned_at: new Date().toISOString() }).select();
+    if (upd.error) throw upd.error;
+    return upd.data[0];
   },
   unassignConversation: async (peer)=>{
-    if (!usingSupabase()) return sqlite.unassignConversation(peer);
-    const supa = getSupabase();
-    const upd = supaResult(await supa.from('conversations').update({ assigned_user_id: null, assigned_at: null }).eq('peer', peer).select());
-    return upd[0];
-  },
-  // templates
-  createTemplate, listTemplates, getTemplateById, updateTemplate, deleteTemplate,
-  // automations
-  createAutomation, listAutomations, getAutomationById, updateAutomation, deleteAutomation,
-  // billing/subscriptions
-  createInvoice, getInvoiceByInvoiceId, listInvoices, markInvoicePaid, createSubscription, getSubscriptionByWorkspace,
-  // analytics
-  getTotals, getCountsByDay, getTopContacts
+    const supa = requireSupa();
+    const upd = await supa.from('conversations').update({ assigned_user_id: null, assigned_at: null }).eq('peer', peer).select();
+    if (upd.error) throw upd.error;
+    return upd.data[0];
+  }
 };
